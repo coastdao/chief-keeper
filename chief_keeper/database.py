@@ -14,26 +14,24 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
-from datetime import timezone
 import os
-from typing import List
+from datetime import timezone
 
-from tinydb import TinyDB, Query
+from tinydb import TinyDB
 from web3 import Web3
 
 from chief_keeper.spell import DSSSpell
-
+from chief_keeper.spell import zero_address
 from pymaker import Address
-from pymaker.util import is_contract_at
 from pymaker.deployment import DssDeployment
 
 
 class SimpleDatabase:
     """ Wraps around the logic to create, update, and query the Keeper's local database """
-    def __init__(self, web3: Web3, block: int, network: str, deployment: DssDeployment):
+
+    def __init__(self, web3: Web3, network: str, deployment: DssDeployment):
+        self.db = None
         self.web3 = web3
-        self.deployment_block = block
         self.network = network
         self.dss = deployment
 
@@ -41,97 +39,57 @@ class SimpleDatabase:
         """ Updates a locally stored database with the DS-Chief state since its last update.
         If a local database is not found, create one and query the DS-Chief state since its deployment.
         """
-        parentpath = os.path.abspath(os.path.join("..", os.path.dirname(__file__)))
-        filepath = os.path.abspath(os.path.join(parentpath, "database", "db_"+self.network+".json"))
+        parent_path = os.path.abspath(os.path.join("..", os.path.dirname(__file__)))
+        filepath = os.path.abspath(os.path.join(parent_path, "database", "db_" + self.network + ".json"))
 
         if os.path.isfile(filepath) and os.access(filepath, os.R_OK):
-        # checks if file exists
+            # checks if file exists
             result = "Simple database exists and is readable"
             self.db = TinyDB(filepath)
         else:
             result = "Either file is missing or is not readable, creating simple database"
             self.db = TinyDB(filepath)
 
-            blockNumber = self.web3.eth.blockNumber
-            self.db.insert({'last_block_checked_for_yays': blockNumber})
+            block_number = self.web3.eth.blockNumber
+            self.db.insert({'last_block_checked': block_number})
 
-            yays = self.get_yays(self.deployment_block, blockNumber)
-            self.db.insert({'yays': yays})
-
-            etas = self.get_etas(yays, blockNumber)
-            self.db.insert({'upcoming_etas': etas})
-
+            hat = self.dss.ds_chief.get_hat().address
+            done = True
+            eta = 0
+            # if hat is zero address, then there is no active spell
+            if hat != zero_address:
+                spell = DSSSpell(self.web3, Address(hat))
+                eta = get_eta_in_unix(spell)
+                done = spell.done()
+            print(f"init hat: {hat}, eta: {eta}, done: {done}")
+            self.db.insert({'hat': {'address': hat, 'eta': eta, 'done': done}})
         return result
 
-    def get_eta_inUnix(self, spell: DSSSpell) -> int:
-        eta = spell.eta()
-        etaInUnix = eta.replace(tzinfo=timezone.utc).timestamp()
-
-        return etaInUnix
-
-    def update_db_etas(self, blockNumber: int):
-        """ Add yays with upcoming etas """
-        yays = self.db.get(doc_id=2)["yays"]
-        etas = self.get_etas(yays, blockNumber)
-
-        self.db.update({'upcoming_etas': etas}, doc_ids=[3])
-
-    def get_etas(self, yays, blockNumber: int):
-        """ Get all upcoming etas """
-        etas = {}
-        for yay in yays:
-
-            #Check if yay is an address to an EOA or a contract
-            if is_contract_at(self.web3, Address(yay)):
-                spell = DSSSpell(self.web3, Address(yay))
-                eta = self.get_eta_inUnix(spell)
-
-                if (eta > 0) and (spell.done() == False):
-                    etas[spell.address.address] = eta
-
-        return etas
-
-    def update_db_yays(self, currentBlockNumber: int):
+    def update_db_hat(self, current_block_number: int):
         """ Store yays that have been `etched` in DS-Chief since the last update """
-        DBblockNumber = self.db.get(doc_id=1)["last_block_checked_for_yays"]
-        currentYays = self.get_yays(DBblockNumber,currentBlockNumber)
-        oldYays = self.db.get(doc_id=2)["yays"]
+        current_hat = self.dss.ds_chief.get_hat()
+        old_hat = self.db.get(doc_id=2)["hat"]
+        if old_hat.get('address') != current_hat.address:
+            spell = DSSSpell(self.web3, current_hat)
+            eta = get_eta_in_unix(spell)
+            done = spell.done()
+            self.db.update({'hat': {'address': current_hat.address, 'eta': eta, 'done': done}}, doc_ids=[2])
+        self.db.update({'last_block_checked': current_block_number}, doc_ids=[1])
 
-        # Take out any duplicates
-        newYays = list(dict.fromkeys(oldYays + currentYays))
+    def update_db_hat_eat(self, eta: int):
+        """ Update the `eat` of the current hat """
+        hat = self.db.get(doc_id=2)["hat"]
+        hat["eta"] = eta
+        self.db.update({'hat': hat}, doc_ids=[2])
 
-        self.db.update({'yays': newYays}, doc_ids=[2])
-        self.db.update({'last_block_checked_for_yays': currentBlockNumber}, doc_ids=[1])
+    def update_db_hat_done(self, done: bool):
+        """ Update the `done` of the current hat """
+        hat = self.db.get(doc_id=2)["hat"]
+        hat["done"] = done
+        self.db.update({'hat': hat}, doc_ids=[2])
 
-    def get_yays(self, beginBlock: int, endBlock: int):
-        """ Get all `etched` yays within a given block range """
-        etches = self.dss.ds_chief.past_etch_in_range(beginBlock, endBlock)
-        maxYays = self.dss.ds_chief.get_max_yays()
 
-        yays = []
-        for etch in etches:
-            yays = yays + self.unpack_slate(etch.slate, maxYays)
-
-        return yays if not None else []
-
-    def unpack_slate(self, slate, maxYays: int) -> List:
-        """ Unpack the slate into its yay constituents """
-        yays = []
-
-        for i in range(0, maxYays):
-            try:
-                yay = [self.dss.ds_chief.get_yay(slate,i)]
-            except ValueError:
-                break
-            yays = yays + yay
-
-        return yays
-
-    # TODO: When time is available, incorporate this recursion
-    # inspiration -> https://github.com/makerdao/dai-plugin-governance/blob/master/src/ChiefService.js#L153
-    # def unpack_slate(self, slate, i = 0):
-    #     try:
-    #         return [self.dss.ds_chief.get_yay(slate, i)].extend(
-    #             self.unpack_slate(slate, i + 1))
-    #     except:
-    #         return []
+def get_eta_in_unix(spell: DSSSpell) -> int:
+    eta = spell.eta()
+    eta_in_unix = eta.replace(tzinfo=timezone.utc).timestamp()
+    return int(eta_in_unix)

@@ -21,6 +21,7 @@ from web3 import Web3
 
 from pymaker import Address, Contract, Transact
 
+zero_address = "0x0000000000000000000000000000000000000000"
 
 class DSSSpell(Contract):
     """A client for the `DSSSpell` contract, which houses logic that makes changes to the Maker Protocol.
@@ -56,8 +57,8 @@ class DSSSpell(Contract):
         return datetime.utcfromtimestamp(timestamp)
 
     @staticmethod
-    def deploy(web3: Web3, pauseAddress: Address, vatAddress: Address):
-        return DSSSpell(web3=web3, address=Contract._deploy(web3, DSSSpell.abi, DSSSpell.bin, [pauseAddress.address, vatAddress.address]))
+    def deploy(web3: Web3, pause_address: Address, vat_address: Address):
+        return DSSSpell(web3=web3, address=Contract._deploy(web3, DSSSpell.abi, DSSSpell.bin, [pause_address.address, vat_address.address]))
 
     def schedule(self):
         return Transact(self, self.web3, self.abi, self.address, self._contract, 'schedule', [])

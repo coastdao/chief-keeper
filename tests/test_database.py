@@ -157,7 +157,7 @@ class TestSimpleDatabase:
         # Updated vote should not delete yays that have had approval history
         simpledb.update_db_yays(block)
         yays = simpledb.db.get(doc_id=2)["yays"]
-        DBblockNumber = simpledb.db.get(doc_id=1)["last_block_checked_for_yays"]
+        DBblockNumber = simpledb.db.get(doc_id=1)["last_block_checked"]
 
         verify([our_address.address,
                 guy_address.address,
